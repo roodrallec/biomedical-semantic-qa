@@ -32,17 +32,23 @@ from matplotlib import pyplot as plt
 TRAINING_DATA_DIR = './datasets/BioASQ-trainingDataset6b.json'
 TEST_SPLIT = 0.1
 VALIDATION_SPLIT = 0.1
+
+# Boolean params
 STEM = SnowballStemmer('english')
-USE_W2V_EMBED = False
+USE_W2V_EMBED = True
 USE_W2V_SKIP_GRAM = 1  # 1 for skip gram 0 for bow
-W2V_MIN_COUNT = 0
+ALLOWED_STOPWORDS = ['does', 'what', 'why', 'how', 'which', 'where', 'when', 'who']
+TRAINABLE = False
+
+# Grid search params
 EMBEDDING_VECTOR_SIZE = 90
 LEARNING_RATE = 0.001
-EPOCHS = 200
-BATCH_SIZE = 128
+BATCH_SIZE = 512
 DROPOUT = 0.3
+#
+W2V_MIN_COUNT = 0
+EPOCHS = 200
 LOG_LEVEL = 0
-ALLOWED_STOPWORDS = ['does', 'what', 'why', 'how', 'which', 'where', 'when', 'who']
 RUN_NAME = "BATCH_SIZE: " + str(BATCH_SIZE) + \
            "; L_RATE: " + str(LEARNING_RATE) + \
            "; EMBED_VEC_SIZE: " + str(EMBEDDING_VECTOR_SIZE) + \
@@ -91,6 +97,8 @@ def text_to_tokens(text):
 
     for word in text.split():
         if word not in ignore_words:
+            if STEM:
+                word = STEM.stem(word)
             tokens.append(word)
 
     logger(tokens)
@@ -117,7 +125,7 @@ def build_bi_lstm(input_sequence_size, embedding_weights, vocab_size, output_siz
         'output_dim': EMBEDDING_VECTOR_SIZE,
         'mask_zero': False,
         'input_length': input_sequence_size,
-        'trainable': False
+        'trainable': TRAINABLE
     }
 
     if USE_W2V_EMBED:
@@ -127,6 +135,7 @@ def build_bi_lstm(input_sequence_size, embedding_weights, vocab_size, output_siz
     x = SpatialDropout1D(DROPOUT)(x)
     # Bi-directional LSTM
     x = Bidirectional(LSTM(EMBEDDING_VECTOR_SIZE, return_sequences=False))(x)
+
     x = Dropout(DROPOUT)(x)
     x = BatchNormalization()(x)
     # Output prediction layer
@@ -215,9 +224,10 @@ def main():
     plot_history(history)
     # RESULTS
     y_hat = model.predict(x_test)
-    logger(classification_report(np.argmax(y_test, axis=1),
-                                 np.argmax(y_hat, axis=1),
-                                 target_names=q_classes), 1)
+    report = classification_report(np.argmax(y_test, axis=1),
+                                   np.argmax(y_hat, axis=1),
+                                   target_names=q_classes)
+    logger(report, 1)
 
 
 if __name__ == "__main__":
