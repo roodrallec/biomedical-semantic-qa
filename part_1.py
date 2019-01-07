@@ -18,6 +18,7 @@ from sklearn.metrics import classification_report
 from matplotlib import pyplot as plt
 
 TRAINING_DATA_DIR = './datasets/BioASQ-trainingDataset6b.json'
+QUORA_DATA_DIR = './datasets/quora_duplicate_questions.tsv'
 STEM = False
 ALLOWED_STOPWORDS = ['does', 'what', 'why', 'how', 'which', 'where', 'when', 'who']
 WORD2VEC_PARAMS = {
@@ -30,15 +31,15 @@ WORD2VEC_PARAMS = {
 }
 TEST_SPLIT = 0.1
 VALIDATION_SPLIT = 0.1
-USE_W2V_EMBED = False
+USE_W2V_EMBED = True
 TRAINABLE_EMBEDDING = False
 USE_CONV = False
-LEARNING_RATE = 0.0005
+LEARNING_RATE = 0.001
 BATCH_SIZE = 128
 DROPOUT = 0.3
 EPOCHS = 100
 # Logging
-LOG_LEVEL = 0
+LOG_LEVEL = 1
 LOG_DIR = "./Graph/" + str(datetime.utcnow())
 
 
@@ -56,7 +57,7 @@ def json_to_df(json_file_path):
 
 
 def text_to_tokens(text):
-    logger(text)
+    logger(text, 0)
     text = text.lower()
     text = re.sub(r"\?", " question ", text)
     text = re.sub("\d+", " digit ", text)
@@ -78,15 +79,17 @@ def text_to_tokens(text):
                 word = SnowballStemmer('english').stem(word)
             tokens.append(word)
 
-    logger(tokens)
+    logger(tokens, 0)
     return tokens
 
 
-def build_vocab_idx(questions_tokens):
+def build_vocab(tokens_list_list):
     vocab = dict()
     idx = 0
-    for question_tokens in questions_tokens:
-        for token in question_tokens:
+    vocab['_PADDING_'] = idx  # reserve idx 0 for padding
+    idx += 1
+    for tokens_list in tokens_list_list:
+        for token in tokens_list:
             if token not in vocab:
                 vocab[token] = idx
                 idx += 1
@@ -102,8 +105,7 @@ def build_keras_lstm(embedding, output_size):
         model.add(Conv1D(filters=32, kernel_size=3, padding='same', activation='relu'))
         model.add(MaxPooling1D(pool_size=2))
 
-    model.add(Bidirectional(LSTM(WORD2VEC_PARAMS['size'])))
-    model.add(Dropout(DROPOUT))
+    model.add(Bidirectional(LSTM(WORD2VEC_PARAMS['size'], dropout=DROPOUT, recurrent_dropout=DROPOUT)))
     model.add(BatchNormalization())
     model.add(Dense(output_size, activation='sigmoid'))
     model.compile(loss='binary_crossentropy', optimizer=Adam(lr=LEARNING_RATE))
@@ -120,21 +122,23 @@ def one_hot_encode_labels(q_labels, q_classes):
     return np.array(y)
 
 
-def build_model(q_texts_tokens, vocab_idx_dict, max_seq_length, output_size):
-    vocab_size = len(vocab_idx_dict.keys())
-    vector_model = Word2Vec(q_texts_tokens, **WORD2VEC_PARAMS)
+def build_model(tokens, vocab, max_seq_length, output_size, embed_w2v):
+    vocab_size = len(vocab.keys())
+    vector_model = Word2Vec(tokens, **WORD2VEC_PARAMS)
     embedding_weights = (np.random.rand(vocab_size, WORD2VEC_PARAMS['size']) - 0.5) / 5.0
 
-    if USE_W2V_EMBED:
-        for word, idx in vocab_idx_dict.items():
+    if embed_w2v:
+        for word, idx in vocab.items():
             try:
                 embedding_weights[idx] = vector_model.wv[word]
             except KeyError:
+                logger('KeyError' + word, 0)
                 pass
 
     embedding = embedding_layer(input_sequence_size=max_seq_length,
                                 embedding_weights=embedding_weights,
                                 vocab_size=vocab_size)
+
     return build_keras_lstm(embedding, output_size)
 
 
@@ -142,7 +146,7 @@ def embedding_layer(vocab_size, input_sequence_size, embedding_weights):
     embedding_arguments = {
         'input_dim': vocab_size,
         'input_length': input_sequence_size,
-        'mask_zero': False,
+        'mask_zero': True,  # index 0 reserved for padding
         'output_dim': WORD2VEC_PARAMS['size'],
         'trainable': TRAINABLE_EMBEDDING,
         'weights': [embedding_weights]
@@ -192,52 +196,99 @@ def save_run_config():
         json.dump(run_config, fp)
 
 
-def save_model_report(model, report):
-    with open(os.path.join(LOG_DIR, 'model.pickle'), 'wb') as fp:
+def save_vocab_model_report(log_dir, vocab, model, report):
+    with open(os.path.join(log_dir, 'vocab.pickle'), 'wb') as fp:
+        pickle.dump(vocab, fp)
+
+    with open(os.path.join(log_dir, 'model.pickle'), 'wb') as fp:
         pickle.dump(model, fp)
 
-    with open(os.path.join(LOG_DIR, 'classification_report.pickle'), 'wb') as fp:
+    with open(os.path.join(log_dir, 'classification_report.pickle'), 'wb') as fp:
         pickle.dump(report, fp)
 
 
-def main():
-    save_run_config()
+def get_quora_duplicate_tokens():
+    df = pd.DataFrame.from_csv(QUORA_DATA_DIR, sep='\t')
+    duplicates = df[df['is_duplicate'] == 1]
+    question_1 = [text_to_tokens(text) for text in duplicates['question1']]
+    question_2 = [text_to_tokens(text) for text in duplicates['question2']]
+    return question_1, question_2
 
+
+def get_q_texts_tokens():
     # Question pre-processing
     [q_texts, q_labels] = parse_questions(json_to_df(TRAINING_DATA_DIR))
-    q_classes = list(np.unique(q_labels))
     q_texts_tokens = [text_to_tokens(text) for text in q_texts]
+    return q_texts_tokens, q_labels
 
-    # Embedding creation
-    vocab_idx_dict = build_vocab_idx(q_texts_tokens)
-    sequences = [[vocab_idx_dict[q_token] for q_token in q_tokens] for q_tokens in q_texts_tokens]
-    max_seq_length = max([len(sequence) for sequence in sequences])
 
-    model = build_model(q_texts_tokens, vocab_idx_dict, max_seq_length, len(q_classes))
+def get_max_seq_length(model):
+    return model.layers[0].get_output_at(0).get_shape().as_list()[1]
+
+
+def get_q_classes(q_labels):
+    return list(np.unique(q_labels))
+
+
+def tokens_to_sequences(vocab_idx_dict, texts_tokens):
+    return [[vocab_idx_dict[token] for token in tokens] for tokens in texts_tokens]
+
+
+def train_test_model(model, sequences, q_labels):
+    # build data x and target y
+    x = pad_sequences(sequences, maxlen=get_max_seq_length(model), padding="pre", truncating="post")
+    y = one_hot_encode_labels(q_labels, get_q_classes(q_labels))
 
     # Train test split
-    y = one_hot_encode_labels(q_labels, q_classes)
-    x = pad_sequences(sequences, maxlen=max_seq_length, padding="pre", truncating="post")
     train_idx = round(len(x) * (1 - TEST_SPLIT))
     x_train, y_train = x[:train_idx], y[:train_idx]
     x_test, y_test = x[train_idx:], y[train_idx:]
 
-    # Model creation
+    # Keras callbacks
     callbacks = [
         EarlyStopping(monitor='val_loss', min_delta=0, patience=20, verbose=0, mode='auto'),
         TensorBoard(log_dir=LOG_DIR, histogram_freq=0, write_graph=True, write_images=True)
     ]
 
+    # Train the model
     hist = model.fit(x_train, y_train, callbacks=callbacks, validation_split=VALIDATION_SPLIT, epochs=EPOCHS,
                      batch_size=BATCH_SIZE, shuffle=True)
-    history = pd.DataFrame(hist.history)
-    plot_history(history)
+
+    # Test the model
+    plot_history(pd.DataFrame(hist.history))
     y_hat = model.predict(x_test)
-    report = classification_report(np.argmax(y_test, axis=1), np.argmax(y_hat, axis=1), target_names=q_classes)
+    report = classification_report(np.argmax(y_test, axis=1), np.argmax(y_hat, axis=1), target_names=get_q_classes(q_labels))
     logger(report, 1)
-    save_model_report(model, report)
-    return model
+    return model, report
+
+
+def run():
+    save_run_config()
+
+    # Original tokens to classify
+    q_texts_tokens, q_labels = get_q_texts_tokens()
+
+    # Additional tokens to use later
+    quora_tokens_q_1, quora_tokens_q_2 = get_quora_duplicate_tokens()
+    quora_tokens = quora_tokens_q_1 + quora_tokens_q_2
+
+    # Embedding creation
+    vocab = build_vocab(q_texts_tokens + quora_tokens)
+    sequences = tokens_to_sequences(vocab, q_texts_tokens)
+    max_sequence_length = max([len(tokens) for tokens in q_texts_tokens + quora_tokens])
+
+    model = build_model(
+        q_texts_tokens,
+        vocab,
+        max_sequence_length,
+        len(get_q_classes(q_labels)),
+        USE_W2V_EMBED)
+
+    trained_model, report = train_test_model(model, sequences, q_labels)
+    save_vocab_model_report(LOG_DIR, vocab, trained_model, report)
+
+    return vocab, trained_model
 
 
 if __name__ == "__main__":
-    main()
+    run()
