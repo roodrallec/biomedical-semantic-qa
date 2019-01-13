@@ -13,3 +13,4 @@ Create a datasets folder in the root directory and add two files named "BioASQ-t
 2. "quora_duplicate_questions.tsv" - The tsv file of the publicly available Quora duplicate question dataset from (https://data.quora.com/First-Quora-Dataset-Release-Question-Pairs)
 
 
+Once the datasets folder has been populated, using Python 3.6, run the part_2.py script. 
