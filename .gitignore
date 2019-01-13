@@ -1,6 +1,6 @@
 *.pickle
 Graph_old
-Graph
+Graph*
 figures
 .idea
 .DS_Store
